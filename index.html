@@ -81,6 +81,10 @@ a{color:#7cb0ff}
 <div id="wrap">
   <aside id="left">
     <div class="sec">
+      <h2>Sites <button class="add" id="btn-add-site" title="Add a publish target">+</button></h2>
+      <div id="sites-host"></div>
+    </div>
+    <div class="sec">
       <h2>Lessons <button class="add" id="btn-add" title="Add a lesson">+</button></h2>
       <div id="lessons-host"><div id="lessons"></div></div>
     </div>
@@ -121,7 +125,24 @@ function toast(msg,kind){const t=$('toast');t.textContent=msg;t.className='show 
 function plainText(html){const d=document.createElement('div');d.innerHTML=DOMPurify.sanitize(html||'');
   // put a space between block elements so stacked lines don't run together
   d.querySelectorAll('div,p,br,li').forEach(el=>el.append(' '));
+  d.querySelectorAll('[data-img-run],img').forEach(el=>el.remove());
   return (d.textContent||'').replace(/\u200B/g,' ').replace(/\s+/g,' ').trim();}
+/* Pull the first image (+ its captured attribution) out of a card side. */
+function firstImage(html){
+  const d=document.createElement('div');d.innerHTML=DOMPurify.sanitize(html||'',{ADD_ATTR:['data-img-meta','data-img-run']});
+  const img=d.querySelector('img');if(!img)return null;
+  const span=d.querySelector('[data-img-meta]');let meta=null;
+  if(span&&span.getAttribute('data-img-meta')){try{meta=JSON.parse(decodeURIComponent(span.getAttribute('data-img-meta')));}catch(_){}}
+  return {src:img.getAttribute('src')||'',meta};
+}
+function creditLine(meta){
+  if(!meta)return '';
+  const by=meta.by||'',src=meta.src||'',link=meta.link||meta.srcLink||'';
+  const byLink=link?`<a href="${esc(link)}" target="_blank" rel="noopener nofollow">${esc(by)}</a>`:esc(by);
+  if(by&&src)return `Photo by ${byLink} on ${esc(src)}`;
+  if(by||src){const who=link?`<a href="${esc(link)}" target="_blank" rel="noopener nofollow">${esc(by||src)}</a>`:esc(by||src);return (by?'Photo: ':'Source: ')+who;}
+  return '';
+}
 function normalizeDeck(data){
   let name=null,arr=null;
   if(Array.isArray(data))arr=data;
@@ -204,7 +225,10 @@ function lessonHTML(l,i){
   const title=`${l.title} — ${cfg.courseTitle}`;
   const desc=l.description||(`${l.title}: `+l.cards.slice(0,6).map(c=>plainText(c.sideB)||plainText(c.sideA)).filter(Boolean).join(', '));
   const rows=l.cards.map(c=>{const front=plainText(c.sideA),back=plainText(c.sideB);
-    return `<div class="vocab-row"><dt>${esc(front)}</dt><dd>${esc(back)}</dd></div>`;}).join('');
+    const im=firstImage(c.sideB)||firstImage(c.sideA);
+    const cred=im&&im.meta?creditLine(im.meta):'';
+    const pic=im?`<div class="vocab-pic"><img src="${esc(im.src)}" alt="${attr(front||back)}" loading="lazy"/>${cred?`<span class="cred">${cred}</span>`:''}</div>`:'';
+    return `<div class="vocab-row${im?' has-pic':''}">${pic}<dt>${esc(front)}</dt><dd>${esc(back)}</dd></div>`;}).join('');
   const prev=i>0?lessons[i-1]:null,next=i<lessons.length-1?lessons[i+1]:null;
   const nav=`<nav class="lesson-nav">${prev?`<a href="${SITE}/${esc(prev.slug)}/">← ${esc(prev.title)}</a>`:'<span></span>'}${next?`<a href="${SITE}/${esc(next.slug)}/">${esc(next.title)} →</a>`:'<span></span>'}</nav>`;
   const ld={"@context":"https://schema.org","@type":"LearningResource","name":l.title,"description":desc,"url":url,"educationalLevel":l.level||"Beginner","teaches":l.cards.map(c=>plainText(c.sideB)).filter(Boolean),"isPartOf":{"@type":"Course","name":cfg.courseTitle,"url":SITE+'/'},"provider":{"@type":"Organization","name":cfg.author,"url":cfg.appUrl}};
@@ -240,11 +264,27 @@ article h1{font-size:28px;color:#fff;line-height:1.25;margin-bottom:10px}.lead{f
 .vocab{display:flex;flex-direction:column;border-radius:10px;overflow:hidden}
 .vocab-row{display:flex;align-items:center;gap:16px;padding:12px 14px;border-bottom:1px solid #1c1c2a}.vocab-row:nth-child(odd){background:#13131c}
 .vocab-row dt{flex:1;min-width:0;font-size:18px;color:#fff;font-weight:600}.vocab-row dd{font-size:15px;color:#d4d4e4;text-align:right;min-width:120px}
+.vocab-pic{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:3px}
+.vocab-pic img{width:120px;height:80px;object-fit:cover;border-radius:8px;display:block}
+.vocab-pic .cred{font-size:8.5px;color:#5a5a72;max-width:120px;text-align:center;line-height:1.2}.vocab-pic .cred a{color:#6a6a9a}
 .lesson-nav{display:flex;justify-content:space-between;gap:12px;margin-top:30px;font-size:13.5px}.lesson-nav a{color:#8aa9d8;text-decoration:none}
 .site-foot{border-top:1px solid #1c1c2a;padding:24px 20px;text-align:center;color:#6a6a86;font-size:12.5px}.site-foot a{color:#8a8aa8}
 @media(max-width:540px){.hero h1{font-size:27px}.vocab-row dd{min-width:80px}}`;
 
 /* ===== rendering the left panel + preview ===== */
+function fmtAgo(ts){if(!ts)return 'never published';const s=(Date.now()-ts)/1000;if(s<60)return 'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
+function renderSites(){
+  const host=$('sites-host');if(!host)return;host.innerHTML='';
+  if(!ghTargets.length){host.innerHTML='<div class="empty" style="padding:14px 8px">No sites yet.<br>Click <b>+</b> to add a GitHub repo to publish to.</div>';return;}
+  ghTargets.forEach(t=>{
+    const row=document.createElement('div');row.className='lrow';row.style.cursor='default';
+    row.innerHTML=`<span class="li"><span class="lt">${esc(t.owner)}/${esc(t.repo)}</span>
+      <span class="lc">${fmtAgo(t.lastAt)}${t.lastAt?' · '+(t.lastLessons||0)+' lessons':''}</span></span>
+      <button class="tbtn primary" data-pubnow="${t.id}" style="height:26px;padding:0 10px;font-size:11px">Publish</button>`;
+    row.querySelector('[data-pubnow]').addEventListener('click',()=>githubModal());
+    host.appendChild(row);
+  });
+}
 function renderLessons(){
   const host=$('lessons');host.innerHTML='';
   if(!lessons.length){host.innerHTML='<div class="empty">No lessons yet.<br>Click <b>+</b> to import your first deck from inaflash.cards.</div>';}
@@ -403,6 +443,8 @@ async function publishToGitHub(target,statusCb){
   const commit=await gh(`/repos/${owner}/${repo}/git/commits`,{method:'POST',body:JSON.stringify({message:'Update course site via Course Builder',tree:newTree.sha,parents:[baseSha]})});
   await gh(`/repos/${owner}/${repo}/git/refs/heads/${b}`,{method:'PATCH',body:JSON.stringify({sha:commit.sha})});
   log('Done.');
+  // record what/when we published on the target
+  try{await db.targets.update(target.id,{lastSha:commit.sha,lastAt:Date.now(),lastLessons:lessons.length});const t=ghTargets.find(x=>x.id===target.id);if(t){t.lastSha=commit.sha;t.lastAt=Date.now();t.lastLessons=lessons.length;}renderSites();}catch(_){}
   return commit.sha;
 }
 
@@ -429,9 +471,9 @@ function githubModal(){
     const tokInput=$('g-token').value.trim();if(tokInput)await ghSaveToken(tokInput);
     const owner=$('g-owner').value.trim(),repo=$('g-repo').value.trim(),branch=$('g-branch').value.trim()||'main';
     if(!owner||!repo){toast('Need owner and repo','err');return;}
-    await db.targets.add({owner,repo,branch});ghTargets=await db.targets.toArray();githubModal();
+    await db.targets.add({owner,repo,branch});ghTargets=await db.targets.toArray();renderSites();githubModal();
   });
-  $('mbox').querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{await db.targets.delete(Number(b.dataset.del));ghTargets=await db.targets.toArray();githubModal();}));
+  $('mbox').querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{await db.targets.delete(Number(b.dataset.del));ghTargets=await db.targets.toArray();renderSites();githubModal();}));
   $('mbox').querySelectorAll('[data-pub]').forEach(b=>b.addEventListener('click',async()=>{
     const tokInput=$('g-token').value.trim();if(tokInput)await ghSaveToken(tokInput);
     if(!ghToken){toast('Paste your token first','err');return;}
@@ -450,11 +492,12 @@ function githubModal(){
 $('btn-add').addEventListener('click',addLessonModal);
 $('btn-settings').addEventListener('click',settingsModal);
 $('btn-github').addEventListener('click',githubModal);
+$('btn-add-site').addEventListener('click',githubModal);
 $('btn-export').addEventListener('click',exportZip);
 $('pv-pick').addEventListener('change',()=>{const v=$('pv-pick').value;if(v!=='__home'){activeLesson=Number(v);renderLessons();}renderPreview();});
 $('modal').addEventListener('mousedown',e=>{if(e.target.id==='modal')closeModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
-(async()=>{try{await load();await ghLoad();}catch(e){console.error(e);toast('Storage failed to open','err');}renderLessons();renderPreview();})();
+(async()=>{try{await load();await ghLoad();}catch(e){console.error(e);toast('Storage failed to open','err');}renderLessons();renderSites();renderPreview();})();
 </script>
 </body>
 </html>
