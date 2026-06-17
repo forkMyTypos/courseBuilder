@@ -73,17 +73,16 @@ a{color:#7cb0ff}
 <body>
 <div id="top">
   <span class="brand"><span class="bolt">⚡</span> Course <b>Builder</b></span>
+  <select id="site-switch" title="Switch course/site"></select>
+  <button class="tbtn" id="btn-new-site" title="New course/site">+ New site</button>
   <span class="sp"></span>
-  <button class="tbtn" id="btn-settings">Course settings</button>
-  <button class="tbtn" id="btn-github">Publish to GitHub</button>
-  <button class="tbtn primary" id="btn-export">Download site (.zip)</button>
+  <button class="tbtn" id="btn-setup">⚙ Site setup</button>
+  <button class="tbtn" id="btn-repo">📁 Repo</button>
+  <button class="tbtn" id="btn-export" title="Download as a ZIP instead of publishing">Download .zip</button>
+  <button class="tbtn primary" id="btn-publish">⬆ Publish</button>
 </div>
 <div id="wrap">
   <aside id="left">
-    <div class="sec">
-      <h2>Sites <button class="add" id="btn-add-site" title="Add a publish target">+</button></h2>
-      <div id="sites-host"></div>
-    </div>
     <div class="sec">
       <h2>Lessons <button class="add" id="btn-add" title="Add a lesson">+</button></h2>
       <div id="lessons-host"><div id="lessons"></div></div>
@@ -112,8 +111,19 @@ a{color:#7cb0ff}
 const db=new Dexie('course-builder');
 db.version(1).stores({course:'id',lessons:'++id,order'});
 db.version(2).stores({course:'id',lessons:'++id,order',gh:'id',targets:'++id'});
-let cfg={id:'cfg',courseTitle:'My Flashcard Course',courseTagline:'A free course. Read each lesson, then study it as flashcards.',siteUrl:'https://thai.inaflash.cards',appUrl:'https://inaflash.cards',author:'inaflash.cards'};
-let lessons=[],activeLesson=null;
+db.version(3).stores({course:'id',lessons:'++id,order,siteId',gh:'id',targets:'++id',sites:'++id'}).upgrade(async tx=>{
+  // migrate the old single global course into one "site"
+  const old=await tx.table('course').get('cfg');
+  const cnt=await tx.table('sites').count();
+  if(!cnt){
+    const s={title:(old&&old.courseTitle)||'My Course',tagline:(old&&old.courseTagline)||'',siteUrl:(old&&old.siteUrl)||'https://example.com',appUrl:(old&&old.appUrl)||'https://inaflash.cards',author:(old&&old.author)||'inaflash.cards',token:'',owner:'',repo:'',branch:'main',lastAt:null,lastLessons:0};
+    const id=await tx.table('sites').add(s);
+    await tx.table('lessons').toCollection().modify(l=>{if(l.siteId==null)l.siteId=id;});
+  }
+});
+let sites=[],activeSite=null;        // activeSite = the site object currently open
+let cfg=null;                        // alias -> activeSite (so the HTML generators keep working)
+let lessons=[],activeLesson=null;    // lessons of the active site
 
 const $=id=>document.getElementById(id);
 const esc=s=>{const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;};
@@ -165,11 +175,21 @@ function normalizeDeck(data){
 /* ===== persistence ===== */
 async function load(){
   await db.open();
-  const c=await db.course.get('cfg');if(c)cfg=c;else await db.course.put(cfg);
-  lessons=(await db.lessons.toArray()).sort((a,b)=>(a.order||0)-(b.order||0));
-  if(lessons.length)activeLesson=lessons[0].id;
+  sites=await db.sites.toArray();
+  if(!sites.length){
+    // first run: create an empty starter site
+    const id=await db.sites.add({title:'My Course',tagline:'A free course. Read each lesson, then study it as flashcards.',siteUrl:'https://example.inaflash.cards',appUrl:'https://inaflash.cards',author:'inaflash.cards',token:'',owner:'',repo:'',branch:'main',lastAt:null,lastLessons:0});
+    sites=await db.sites.toArray();
+  }
+  await openSite(sites[0].id);
 }
-async function saveCfg(){await db.course.put(cfg);}
+async function openSite(id){
+  activeSite=sites.find(s=>s.id===id)||sites[0];
+  cfg=activeSite; // the HTML generators read cfg.title/tagline/siteUrl/appUrl/author
+  lessons=(await db.lessons.where('siteId').equals(activeSite.id).toArray()).sort((a,b)=>(a.order||0)-(b.order||0));
+  activeLesson=lessons.length?lessons[0].id:null;
+}
+async function saveSite(){if(activeSite)await db.sites.put(activeSite);}
 async function saveLesson(l){await db.lessons.put(l);}
 async function reorder(){for(let i=0;i<lessons.length;i++){lessons[i].order=i;await db.lessons.update(lessons[i].id,{order:i});}}
 
@@ -187,7 +207,7 @@ function pageHead(o){const SITE=cfg.siteUrl.replace(/\/$/,'');return `<!DOCTYPE 
 <meta property="og:title" content="${attr(o.title)}"/>
 <meta property="og:description" content="${attr(o.desc)}"/>
 <meta property="og:url" content="${esc(o.url)}"/>
-<meta property="og:site_name" content="${attr(cfg.courseTitle)}"/>
+<meta property="og:site_name" content="${attr((cfg.title||cfg.courseTitle||""))}"/>
 <meta name="twitter:card" content="summary"/>
 <meta name="twitter:title" content="${attr(o.title)}"/>
 <meta name="twitter:description" content="${attr(o.desc)}"/>
@@ -196,7 +216,7 @@ function pageHead(o){const SITE=cfg.siteUrl.replace(/\/$/,'');return `<!DOCTYPE 
 </head>
 <body>
 <header class="site-head">
-  <a class="brand" href="${SITE}/"><span class="bolt">⚡</span> ${esc(cfg.courseTitle)}</a>
+  <a class="brand" href="${SITE}/"><span class="bolt">⚡</span> ${esc((cfg.title||cfg.courseTitle||""))}</a>
   <a class="app-link" href="${cfg.appUrl}" target="_blank" rel="noopener">Built with inaflash.cards ↗</a>
 </header>`;}
 function pageFoot(){return `<footer class="site-foot"><p>Studied with <a href="${cfg.appUrl}" target="_blank" rel="noopener">inaflash.cards</a>, a local-first flashcard app.</p></footer>
@@ -211,10 +231,10 @@ function landingHTML(){
       <span class="num">${String(i+1).padStart(2,'0')}</span>
       <span class="meta"><span class="lt">${esc(l.title)}</span><span class="ld">${l.cards.length} cards${l.level?' · '+esc(l.level):''}</span></span>
       <span class="go">→</span></a></li>`).join('');
-  const courseLd={"@context":"https://schema.org","@type":"Course","name":cfg.courseTitle,"description":cfg.courseTagline,"url":url,"provider":{"@type":"Organization","name":cfg.author,"url":cfg.appUrl}};
-  const itemList={"@context":"https://schema.org","@type":"ItemList","name":cfg.courseTitle,"itemListElement":lessons.map((l,i)=>({"@type":"ListItem","position":i+1,"name":l.title,"url":`${SITE}/${l.slug}/`}))};
-  return pageHead({title:cfg.courseTitle,desc:cfg.courseTagline,url})
-    +`<main class="wrap"><section class="hero"><h1>${esc(cfg.courseTitle)}</h1><p class="tagline">${esc(cfg.courseTagline)}</p>
+  const courseLd={"@context":"https://schema.org","@type":"Course","name":(cfg.title||cfg.courseTitle||""),"description":(cfg.tagline||cfg.courseTagline||""),"url":url,"provider":{"@type":"Organization","name":cfg.author,"url":cfg.appUrl}};
+  const itemList={"@context":"https://schema.org","@type":"ItemList","name":(cfg.title||cfg.courseTitle||""),"itemListElement":lessons.map((l,i)=>({"@type":"ListItem","position":i+1,"name":l.title,"url":`${SITE}/${l.slug}/`}))};
+  return pageHead({title:(cfg.title||cfg.courseTitle||""),desc:(cfg.tagline||cfg.courseTagline||""),url})
+    +`<main class="wrap"><section class="hero"><h1>${esc((cfg.title||cfg.courseTitle||""))}</h1><p class="tagline">${esc((cfg.tagline||cfg.courseTagline||""))}</p>
     <p class="how">Each lesson is a readable list you can also study as interactive flashcards — free, no signup.</p></section>
     <section><h2 class="sec-h">Lessons</h2><ol class="lesson-list">${items||'<li class="empty-li">No lessons yet.</li>'}</ol></section></main>
     <script type="application/ld+json">${JSON.stringify(courseLd)}<\/script>
@@ -222,7 +242,7 @@ function landingHTML(){
 }
 function lessonHTML(l,i){
   const SITE=cfg.siteUrl.replace(/\/$/,'');const url=`${SITE}/${l.slug}/`;
-  const title=`${l.title} — ${cfg.courseTitle}`;
+  const title=`${l.title} — ${(cfg.title||cfg.courseTitle||"")}`;
   const desc=l.description||(`${l.title}: `+l.cards.slice(0,6).map(c=>plainText(c.sideB)||plainText(c.sideA)).filter(Boolean).join(', '));
   const rows=l.cards.map(c=>{const front=plainText(c.sideA),back=plainText(c.sideB);
     const im=firstImage(c.sideB)||firstImage(c.sideA);
@@ -231,10 +251,10 @@ function lessonHTML(l,i){
     return `<div class="vocab-row${im?' has-pic':''}">${pic}<dt>${esc(front)}</dt><dd>${esc(back)}</dd></div>`;}).join('');
   const prev=i>0?lessons[i-1]:null,next=i<lessons.length-1?lessons[i+1]:null;
   const nav=`<nav class="lesson-nav">${prev?`<a href="${SITE}/${esc(prev.slug)}/">← ${esc(prev.title)}</a>`:'<span></span>'}${next?`<a href="${SITE}/${esc(next.slug)}/">${esc(next.title)} →</a>`:'<span></span>'}</nav>`;
-  const ld={"@context":"https://schema.org","@type":"LearningResource","name":l.title,"description":desc,"url":url,"educationalLevel":l.level||"Beginner","teaches":l.cards.map(c=>plainText(c.sideB)).filter(Boolean),"isPartOf":{"@type":"Course","name":cfg.courseTitle,"url":SITE+'/'},"provider":{"@type":"Organization","name":cfg.author,"url":cfg.appUrl}};
-  const crumbs={"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":cfg.courseTitle,"item":SITE+'/'},{"@type":"ListItem","position":2,"name":l.title,"item":url}]};
+  const ld={"@context":"https://schema.org","@type":"LearningResource","name":l.title,"description":desc,"url":url,"educationalLevel":l.level||"Beginner","teaches":l.cards.map(c=>plainText(c.sideB)).filter(Boolean),"isPartOf":{"@type":"Course","name":(cfg.title||cfg.courseTitle||""),"url":SITE+'/'},"provider":{"@type":"Organization","name":cfg.author,"url":cfg.appUrl}};
+  const crumbs={"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":(cfg.title||cfg.courseTitle||""),"item":SITE+'/'},{"@type":"ListItem","position":2,"name":l.title,"item":url}]};
   return pageHead({title,desc,url,type:'article'})
-    +`<main class="wrap"><nav class="crumbs"><a href="${SITE}/">${esc(cfg.courseTitle)}</a> <span>/</span> ${esc(l.title)}</nav>
+    +`<main class="wrap"><nav class="crumbs"><a href="${SITE}/">${esc((cfg.title||cfg.courseTitle||""))}</a> <span>/</span> ${esc(l.title)}</nav>
     <article><h1>${esc(l.title)}</h1><p class="lead">${esc(desc)}</p>
     <div class="study-cta"><a class="btn primary" href="${importHref(l)}">★ Study these as flashcards</a>
       <a class="btn" href="${relPath(url)}decks/${esc(l.slug)}.json" download>Download deck (.json)</a></div>
@@ -273,17 +293,25 @@ article h1{font-size:28px;color:#fff;line-height:1.25;margin-bottom:10px}.lead{f
 
 /* ===== rendering the left panel + preview ===== */
 function fmtAgo(ts){if(!ts)return 'never published';const s=(Date.now()-ts)/1000;if(s<60)return 'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
-function renderSites(){
-  const host=$('sites-host');if(!host)return;host.innerHTML='';
-  if(!ghTargets.length){host.innerHTML='<div class="empty" style="padding:14px 8px">No sites yet.<br>Click <b>+</b> to add a GitHub repo to publish to.</div>';return;}
-  ghTargets.forEach(t=>{
-    const row=document.createElement('div');row.className='lrow';row.style.cursor='default';
-    row.innerHTML=`<span class="li"><span class="lt">${esc(t.owner)}/${esc(t.repo)}</span>
-      <span class="lc">${fmtAgo(t.lastAt)}${t.lastAt?' · '+(t.lastLessons||0)+' lessons':''}</span></span>
-      <button class="tbtn primary" data-pubnow="${t.id}" style="height:26px;padding:0 10px;font-size:11px">Publish</button>`;
-    row.querySelector('[data-pubnow]').addEventListener('click',()=>githubModal());
-    host.appendChild(row);
-  });
+
+// Populate the top site switcher
+function renderSiteSwitch(){
+  const sel=$('site-switch');if(!sel)return;
+  sel.innerHTML=sites.map(s=>`<option value="${s.id}">${esc(s.title||'Untitled')}</option>`).join('');
+  if(activeSite)sel.value=activeSite.id;
+}
+
+/* ===== Site setup modal: everything for ONE course/repo in one place ===== */
+function closeModal(){$('modal').classList.remove('show');}
+function renderPreview(){
+  const fr=$('preview'),emp=$('preview-empty');
+  if(!lessons.length){fr.style.display='none';emp.style.display='flex';$('pv-count').textContent='';return;}
+  fr.style.display='block';emp.style.display='none';
+  const pickVal=$('pv-pick').value;
+  let html;
+  if(pickVal==='__home'){html=landingHTML();$('pv-count').textContent=lessons.length+' lessons';}
+  else{const i=lessons.findIndex(l=>l.id==pickVal);const l=lessons[i];if(!l){html=landingHTML();}else{html=lessonHTML(l,i);$('pv-count').textContent=l.cards.length+' cards';}}
+  fr.srcdoc=html.replace('</head>',`<style>${SITE_CSS}</style></head>`);
 }
 function renderLessons(){
   const host=$('lessons');host.innerHTML='';
@@ -304,19 +332,6 @@ function renderLessons(){
   const pick=$('pv-pick');pick.innerHTML='<option value="__home">🏠 Landing page</option>'+lessons.map(l=>`<option value="${l.id}">${esc(l.title)}</option>`).join('');
   pick.value=activeLesson||'__home';
 }
-function renderPreview(){
-  const fr=$('preview'),emp=$('preview-empty');
-  if(!lessons.length){fr.style.display='none';emp.style.display='flex';$('pv-count').textContent='';return;}
-  fr.style.display='block';emp.style.display='none';
-  const pickVal=$('pv-pick').value;
-  let html;
-  if(pickVal==='__home'){html=landingHTML();$('pv-count').textContent=lessons.length+' lessons';}
-  else{const i=lessons.findIndex(l=>l.id==pickVal);const l=lessons[i];if(!l){html=landingHTML();}else{html=lessonHTML(l,i);$('pv-count').textContent=l.cards.length+' cards';}}
-  fr.srcdoc=html.replace('</head>',`<style>${SITE_CSS}</style></head>`);
-}
-
-/* ===== modals ===== */
-function closeModal(){$('modal').classList.remove('show');}
 function addLessonModal(){
   $('mbox').innerHTML=`<h3>Add a lesson</h3><div class="sub">Paste the JSON you exported from inaflash.cards, or choose the file. The deck's cards become this lesson.</div>
     <div class="fld"><label>Lesson title</label><input id="m-title" placeholder="e.g. Countries"/></div>
@@ -344,28 +359,73 @@ async function addLessonCommit(){
   let slug=slugify(t)||('lesson-'+(lessons.length+1));
   // ensure unique slug
   const used=new Set(lessons.map(l=>l.slug));let s=slug,n=2;while(used.has(s)){s=slug+'-'+n++;}slug=s;
-  const lesson={title:t,slug,description:$('m-desc').value.trim(),level:$('m-level').value.trim(),cards:norm.cards,order:lessons.length};
+  const lesson={siteId:activeSite.id,title:t,slug,description:$('m-desc').value.trim(),level:$('m-level').value.trim(),cards:norm.cards,order:lessons.length};
   const id=await db.lessons.add(lesson);lesson.id=id;lessons.push(lesson);activeLesson=id;
   closeModal();renderLessons();renderPreview();toast('Added "'+t+'" ('+norm.cards.length+' cards)','ok');
 }
-function settingsModal(){
-  $('mbox').innerHTML=`<h3>Course settings</h3><div class="sub">These fill the landing page, meta tags, and the import links. The site URL must match where you'll host it.</div>
-    <div class="fld"><label>Course title</label><input id="s-title" value="${attr(cfg.courseTitle)}"/></div>
-    <div class="fld"><label>Tagline</label><textarea id="s-tag">${esc(cfg.courseTagline)}</textarea></div>
-    <div class="fld"><label>Site URL (where this course is hosted)</label><input id="s-site" value="${attr(cfg.siteUrl)}" placeholder="https://thai.inaflash.cards"/></div>
-    <div class="fld"><label>App URL (your inaflash.cards)</label><input id="s-app" value="${attr(cfg.appUrl)}" placeholder="https://inaflash.cards"/></div>
-    <div class="fld"><label>Author / organization</label><input id="s-author" value="${attr(cfg.author)}"/></div>
-    <div class="row"><button class="tbtn" id="s-cancel">Cancel</button><button class="tbtn primary" id="s-ok">Save</button></div>`;
+
+function siteSetupModal(){
+  const s=activeSite;
+  $('mbox').innerHTML=`<h3>Site setup</h3>
+    <div class="sub">Everything for this one course &amp; its GitHub repo. One course = one repo.</div>
+    <div class="fld"><label>Course title</label><input id="s-title" value="${attr(s.title||'')}"/></div>
+    <div class="fld"><label>Tagline</label><textarea id="s-tag">${esc(s.tagline||'')}</textarea></div>
+    <div class="fld"><label>Site URL (where it's hosted &mdash; sets the CNAME &amp; import links)</label><input id="s-site" value="${attr(s.siteUrl||'')}" placeholder="https://thai.inaflash.cards"/></div>
+    <div class="fld"><label>App URL</label><input id="s-app" value="${attr(s.appUrl||'https://inaflash.cards')}" placeholder="https://inaflash.cards"/></div>
+    <div class="fld"><label>Author / organization</label><input id="s-author" value="${attr(s.author||'')}"/></div>
+    <hr style="border:none;border-top:1px solid #1f1f2e;margin:16px 0"/>
+    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#6f6f90;margin-bottom:8px">GitHub publishing</div>
+    <div class="sub" style="margin-bottom:10px">Paste a <b>fine-grained token</b> for this repo (Contents: Read &amp; write). It's stored only in this browser. Paste it and I'll detect which repos it can publish to.</div>
+    <div class="fld"><label>GitHub token (for this site)</label><input id="s-token" type="password" placeholder="${s.token?'\u2022\u2022\u2022\u2022\u2022\u2022 saved \u2014 paste to replace':'github_pat_\u2026'}"/>
+      <div class="hint"><a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener"><b>\u2192 Create a token \u2197</b></a> &middot; <button id="s-detect" style="background:none;border:none;color:#7cb0ff;cursor:pointer;font-size:11px;padding:0">Detect my repos</button></div>
+      <div class="hint" style="margin-top:4px;line-height:1.5;color:#7a7a98">On that page set: <b>Repository access</b> \u2192 Only select repositories \u2192 your repo. <b>Permissions</b> \u2192 Contents: <b>Read and write</b>, Pages: <b>Read</b>. Then Generate &amp; copy.</div></div>
+    <div class="fld"><label>Repository</label>
+      <select id="s-repo-sel" style="width:100%;height:32px;background:#13131c;border:1px solid #26263a;border-radius:7px;color:#e6e6f0;font-size:12.5px;padding:0 8px"><option value="">${s.owner?esc(s.owner+'/'+s.repo):'\u2014 paste token & detect, or type below \u2014'}</option></select>
+      <div style="display:flex;gap:6px;margin-top:6px"><input id="s-owner" placeholder="owner" value="${attr(s.owner||'')}" style="flex:1"/><input id="s-repo" placeholder="repo" value="${attr(s.repo||'')}" style="flex:1"/><input id="s-branch" placeholder="main" value="${attr(s.branch||'main')}" style="width:74px"/></div>
+      <div class="hint">Pick from the dropdown after detecting, or type owner/repo manually.</div></div>
+    <div id="s-status" class="hint" style="min-height:16px;color:#7ec4b8"></div>
+    <div class="row"><button class="tbtn" id="s-delete" style="margin-right:auto;border-color:#5a2b2b;color:#f88">Delete site</button><button class="tbtn" id="s-cancel">Cancel</button><button class="tbtn primary" id="s-save">Save</button></div>`;
   $('modal').classList.add('show');
   $('s-cancel').addEventListener('click',closeModal);
-  $('s-ok').addEventListener('click',async()=>{
-    cfg.courseTitle=$('s-title').value.trim()||'My Course';
-    cfg.courseTagline=$('s-tag').value.trim();
-    cfg.siteUrl=($('s-site').value.trim()||'https://example.com').replace(/\/$/,'');
-    cfg.appUrl=($('s-app').value.trim()||'https://inaflash.cards').replace(/\/$/,'');
-    cfg.author=$('s-author').value.trim()||'inaflash.cards';
-    await saveCfg();closeModal();renderLessons();renderPreview();toast('Settings saved','ok');
+  // detect repos from the token
+  const doDetect=async()=>{
+    const tok=$('s-token').value.trim()||s.token;
+    if(!tok){$('s-status').textContent='Paste a token first.';return;}
+    $('s-status').textContent='Detecting repos\u2026';
+    try{
+      const r=await fetch('https://api.github.com/user/repos?per_page=100&sort=updated',{headers:{'Authorization':'Bearer '+tok,'Accept':'application/vnd.github+json'}});
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      const repos=await r.json();
+      const sel=$('s-repo-sel');
+      sel.innerHTML='<option value="">\u2014 choose a repo \u2014</option>'+repos.map(rp=>`<option value="${esc(rp.owner.login+'/'+rp.name)}">${esc(rp.full_name)}</option>`).join('');
+      if(s.owner)sel.value=s.owner+'/'+s.repo;
+      $('s-status').textContent='Found '+repos.length+' repos \u2014 pick one above.';
+    }catch(e){$('s-status').textContent='Couldn\u2019t detect ('+e.message+'). You can still type owner/repo manually.';}
+  };
+  $('s-detect').addEventListener('click',e=>{e.preventDefault();doDetect();});
+  $('s-token').addEventListener('blur',()=>{if($('s-token').value.trim())doDetect();});
+  $('s-repo-sel').addEventListener('change',()=>{const v=$('s-repo-sel').value;if(v&&v.includes('/')){const[o,rp]=v.split('/');$('s-owner').value=o;$('s-repo').value=rp;}});
+  $('s-delete').addEventListener('click',async()=>{
+    if(sites.length<=1){toast('Keep at least one site','err');return;}
+    if(!confirm('Delete this site "'+(s.title||'')+'"? Its lessons here are removed too (the GitHub repo is NOT touched).'))return;
+    await db.lessons.where('siteId').equals(s.id).delete();
+    await db.sites.delete(s.id);sites=await db.sites.toArray();await openSite(sites[0].id);
+    closeModal();renderSiteSwitch();renderLessons();renderPreview();toast('Site deleted','info');
   });
+  $('s-save').addEventListener('click',async()=>{
+    s.title=$('s-title').value.trim()||'My Course';
+    s.tagline=$('s-tag').value.trim();
+    s.siteUrl=($('s-site').value.trim()||'https://example.com').replace(/\/$/,'');
+    s.appUrl=($('s-app').value.trim()||'https://inaflash.cards').replace(/\/$/,'');
+    s.author=$('s-author').value.trim()||'inaflash.cards';
+    const tok=$('s-token').value.trim();if(tok)s.token=tok;
+    s.owner=$('s-owner').value.trim();s.repo=$('s-repo').value.trim();s.branch=$('s-branch').value.trim()||'main';
+    await saveSite();closeModal();renderSiteSwitch();renderLessons();renderPreview();toast('Site saved','ok');
+  });
+}
+async function newSite(){
+  const id=await db.sites.add({title:'New course',tagline:'',siteUrl:'https://example.inaflash.cards',appUrl:'https://inaflash.cards',author:'inaflash.cards',token:'',owner:'',repo:'',branch:'main',lastAt:null,lastLessons:0});
+  sites=await db.sites.toArray();await openSite(id);renderSiteSwitch();renderLessons();renderPreview();siteSetupModal();
 }
 
 /* ===== export ZIP ===== */
@@ -397,11 +457,12 @@ async function exportZip(){
    pastes once; it lives only in this browser's IndexedDB and is sent only to
    api.github.com. This is intended as a PRIVATE tool — never promote a build
    that stores a token client-side. */
-let ghToken=null,ghTargets=[];
-async function ghLoad(){const t=await db.gh.get('token');ghToken=t?t.value:null;ghTargets=await db.targets.toArray();}
-async function ghSaveToken(v){ghToken=v||null;if(v)await db.gh.put({id:'token',value:v});else await db.gh.delete('token');}
-
-// Build the same file set the ZIP export produces, as {path -> {content}}.
+/* ===== GitHub publishing (per-site) ===== */
+async function ghCall(token,path,opts){
+  const r=await fetch('https://api.github.com'+path,Object.assign({headers:{'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}},opts||{}));
+  if(!r.ok){let m='';try{m=(await r.json()).message;}catch(_){}throw new Error('GitHub '+r.status+(m?': '+m:''));}
+  return r.status===204?null:r.json();
+}
 function collectSiteFiles(){
   const SITE=cfg.siteUrl.replace(/\/$/,'');
   const files={};
@@ -409,95 +470,136 @@ function collectSiteFiles(){
   files['style.css']={content:SITE_CSS};
   files['.nojekyll']={content:''};
   try{files['CNAME']={content:new URL(SITE).host+'\n'};}catch(_){}
-  lessons.forEach((l,i)=>{
-    files[l.slug+'/index.html']={content:lessonHTML(l,i)};
-    files['decks/'+l.slug+'.json']={content:deckJSON(l)};
-  });
+  lessons.forEach((l,i)=>{files[l.slug+'/index.html']={content:lessonHTML(l,i)};files['decks/'+l.slug+'.json']={content:deckJSON(l)};});
   const urls=[SITE+'/',...lessons.map(l=>`${SITE}/${l.slug}/`)];
   files['sitemap.xml']={content:`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(u=>`  <url><loc>${u}</loc></url>`).join('\n')}\n</urlset>\n`};
   files['robots.txt']={content:`User-agent: *\nAllow: /\nSitemap: ${SITE}/sitemap.xml\n`};
   return files;
 }
-async function gh(path,opts){
-  const r=await fetch('https://api.github.com'+path,Object.assign({headers:{'Authorization':'Bearer '+ghToken,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}},opts||{}));
-  if(!r.ok){let m='';try{m=(await r.json()).message;}catch(_){}throw new Error('GitHub '+r.status+(m?': '+m:''));}
-  return r.status===204?null:r.json();
-}
-async function publishToGitHub(target,statusCb){
-  const{owner,repo,branch}=target;const b=branch||'main';
-  const log=m=>{if(statusCb)statusCb(m);};
+async function publishActiveSite(statusCb){
+  const s=activeSite;const log=m=>statusCb&&statusCb(m);
+  if(!s.token)throw new Error('No token saved \u2014 open Site setup and paste one.');
+  if(!s.owner||!s.repo)throw new Error('No repo set \u2014 open Site setup and choose one.');
+  if(!lessons.length)throw new Error('Add at least one lesson first.');
+  const b=s.branch||'main';const base=`/repos/${s.owner}/${s.repo}`;
   log('Reading branch \u2026');
   let baseSha,baseTree;
-  try{const ref=await gh(`/repos/${owner}/${repo}/git/ref/heads/${b}`);baseSha=ref.object.sha;
-      const c=await gh(`/repos/${owner}/${repo}/git/commits/${baseSha}`);baseTree=c.tree.sha;}
-  catch(e){throw new Error('Could not read branch "'+b+'" \u2014 check repo, branch, and token access. ('+e.message+')');}
+  try{const ref=await ghCall(s.token,`${base}/git/ref/heads/${b}`);baseSha=ref.object.sha;const c=await ghCall(s.token,`${base}/git/commits/${baseSha}`);baseTree=c.tree.sha;}
+  catch(e){throw new Error('Could not read branch "'+b+'" \u2014 check repo, branch & token access. ('+e.message+')');}
   const files=collectSiteFiles();const names=Object.keys(files);
   log('Uploading '+names.length+' files \u2026');
   const tree=[];
-  for(const path of names){
-    const blob=await gh(`/repos/${owner}/${repo}/git/blobs`,{method:'POST',body:JSON.stringify({content:files[path].content,encoding:'utf-8'})});
-    tree.push({path,mode:'100644',type:'blob',sha:blob.sha});
-  }
+  for(const path of names){const blob=await ghCall(s.token,`${base}/git/blobs`,{method:'POST',body:JSON.stringify({content:files[path].content,encoding:'utf-8'})});tree.push({path,mode:'100644',type:'blob',sha:blob.sha});}
   log('Creating commit \u2026');
-  const newTree=await gh(`/repos/${owner}/${repo}/git/trees`,{method:'POST',body:JSON.stringify({base_tree:baseTree,tree})});
-  const commit=await gh(`/repos/${owner}/${repo}/git/commits`,{method:'POST',body:JSON.stringify({message:'Update course site via Course Builder',tree:newTree.sha,parents:[baseSha]})});
-  await gh(`/repos/${owner}/${repo}/git/refs/heads/${b}`,{method:'PATCH',body:JSON.stringify({sha:commit.sha})});
-  log('Done.');
-  // record what/when we published on the target
-  try{await db.targets.update(target.id,{lastSha:commit.sha,lastAt:Date.now(),lastLessons:lessons.length});const t=ghTargets.find(x=>x.id===target.id);if(t){t.lastSha=commit.sha;t.lastAt=Date.now();t.lastLessons=lessons.length;}renderSites();}catch(_){}
-  return commit.sha;
+  const newTree=await ghCall(s.token,`${base}/git/trees`,{method:'POST',body:JSON.stringify({base_tree:baseTree,tree})});
+  const commit=await ghCall(s.token,`${base}/git/commits`,{method:'POST',body:JSON.stringify({message:'Update course site via Course Builder',tree:newTree.sha,parents:[baseSha]})});
+  await ghCall(s.token,`${base}/git/refs/heads/${b}`,{method:'PATCH',body:JSON.stringify({sha:commit.sha})});
+  s.lastAt=Date.now();s.lastLessons=lessons.length;await saveSite();
+  log('Done.');return commit.sha;
+}
+/* ===== One-repo control panel: browse files, delete/prune, Pages status ===== */
+async function repoListFiles(){
+  const s=activeSite;const b=s.branch||'main';
+  const t=await ghCall(s.token,`/repos/${s.owner}/${s.repo}/git/trees/${b}?recursive=1`);
+  return (t.tree||[]).filter(x=>x.type==='blob').map(x=>({path:x.path,sha:x.sha,size:x.size}));
+}
+async function repoDeleteFile(path,sha){
+  const s=activeSite;const b=s.branch||'main';
+  await ghCall(s.token,`/repos/${s.owner}/${s.repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`,
+    {method:'DELETE',body:JSON.stringify({message:'Delete '+path+' via Course Builder',sha,branch:b})});
+}
+// Files the builder WOULD generate right now — anything else live is "stray".
+function expectedPaths(){return new Set(Object.keys(collectSiteFiles()));}
+async function pagesInfo(){
+  const s=activeSite;
+  try{const p=await ghCall(s.token,`/repos/${s.owner}/${s.repo}/pages`);return p;}catch(e){return {_err:e.message};}
+}
+function repoModal(){
+  const s=activeSite;
+  if(!s.token||!s.owner||!s.repo){$('mbox').innerHTML=`<h3>Repo</h3><div class="sub">Set up this site's token and repo first.</div><div class="row"><button class="tbtn" id="r-cancel">Close</button><button class="tbtn primary" id="r-setup">Open Site setup</button></div>`;$('modal').classList.add('show');$('r-cancel').addEventListener('click',closeModal);$('r-setup').addEventListener('click',()=>{closeModal();siteSetupModal();});return;}
+  $('mbox').innerHTML=`<h3>Repo: ${esc(s.owner)}/${esc(s.repo)}</h3>
+    <div class="sub">What's currently live in the repo. Delete stray files or prune old lessons here \u2014 no need to open GitHub.</div>
+    <div id="r-pages" class="hint" style="min-height:16px;margin-bottom:8px">Checking deploy status\u2026</div>
+    <div id="r-status" class="hint" style="min-height:14px;color:#7ec4b8"></div>
+    <div id="r-files" style="max-height:46vh;overflow-y:auto;border:1px solid #1f1f2e;border-radius:8px;margin:8px 0">Loading files\u2026</div>
+    <div class="row"><button class="tbtn" id="r-cancel">Close</button><button class="tbtn" id="r-refresh">Refresh</button><button class="tbtn primary" id="r-prune">Prune old lessons</button></div>`;
+  $('modal').classList.add('show');
+  $('r-cancel').addEventListener('click',closeModal);
+  $('r-refresh').addEventListener('click',loadRepoView);
+  $('r-prune').addEventListener('click',pruneStray);
+  loadRepoView();loadPagesView();
+}
+let _repoFiles=[];
+async function loadRepoView(){
+  const host=$('r-files');if(!host)return;host.innerHTML='Loading files\u2026';
+  try{
+    _repoFiles=await repoListFiles();
+    const expected=expectedPaths();
+    if(!_repoFiles.length){host.innerHTML='<div class="empty" style="padding:14px">Repo is empty \u2014 hit Publish to populate it.</div>';return;}
+    host.innerHTML='';
+    _repoFiles.sort((a,b)=>a.path.localeCompare(b.path)).forEach(f=>{
+      const stray=!expected.has(f.path)&&f.path!=='CNAME'&&f.path!=='.nojekyll';
+      const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid #16161f;font-size:12px';
+      row.innerHTML=`<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${stray?'#e0a060':'#c8c8dc'}">${esc(f.path)}${stray?' <span style="font-size:9px;color:#a06a30">(not in current build)</span>':''}</span>
+        <span style="font-size:10px;color:#62627e">${(f.size/1024).toFixed(1)}kb</span>
+        <button class="del" data-p="${esc(f.path)}" data-s="${esc(f.sha)}" title="Delete this file">\u00d7</button>`;
+      row.querySelector('.del').addEventListener('click',async()=>{
+        if(!confirm('Delete "'+f.path+'" from the repo? This commits immediately.'))return;
+        try{await repoDeleteFile(f.path,f.sha);$('r-status').textContent='Deleted '+f.path;loadRepoView();}
+        catch(e){$('r-status').innerHTML='\u274c '+esc(e.message);}
+      });
+      host.appendChild(row);
+    });
+  }catch(e){host.innerHTML='<div class="empty" style="padding:14px;color:#f88">Couldn\u2019t list files: '+esc(e.message)+'</div>';}
+}
+async function loadPagesView(){
+  const el=$('r-pages');if(!el)return;
+  const p=await pagesInfo();
+  if(p._err){el.innerHTML='Deploy status unavailable ('+esc(p._err)+'). <span style="color:#8a8aa8">Add <b>Pages: read</b> to your token to see it.</span>';return;}
+  const url=p.html_url||'';const st=p.status||'unknown';const cname=p.cname?' \u00b7 domain: '+esc(p.cname):'';
+  el.innerHTML=`Pages: <b style="color:${st==='built'?'#6ee7a0':'#e0c060'}">${esc(st)}</b>${cname}${url?' \u00b7 <a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>':''}`;
+}
+async function pruneStray(){
+  const expected=expectedPaths();
+  const stray=_repoFiles.filter(f=>!expected.has(f.path)&&f.path!=='CNAME'&&f.path!=='.nojekyll');
+  if(!stray.length){$('r-status').textContent='Nothing to prune \u2014 repo matches the current build.';return;}
+  if(!confirm('Delete '+stray.length+' file'+(stray.length!==1?'s':'')+' not in the current build?\n\n'+stray.map(f=>f.path).join('\n')))return;
+  const btn=$('r-prune');btn.disabled=true;
+  let n=0;for(const f of stray){try{await repoDeleteFile(f.path,f.sha);n++;$('r-status').textContent='Pruned '+n+'/'+stray.length+'\u2026';}catch(e){$('r-status').innerHTML='\u274c '+esc(e.message);break;}}
+  btn.disabled=false;loadRepoView();toast('Pruned '+n+' file'+(n!==1?'s':''),'ok');
 }
 
-function githubModal(){
-  const hasTok=!!ghToken;
-  const targetRows=ghTargets.map(t=>`<div class="lrow" data-tid="${t.id}" style="cursor:default">
-      <span class="li"><span class="lt">${esc(t.owner)}/${esc(t.repo)}</span><span class="lc">branch: ${esc(t.branch||'main')}</span></span>
-      <button class="tbtn primary" data-pub="${t.id}" style="height:28px;padding:0 11px;font-size:11px">Publish</button>
-      <button class="del" data-del="${t.id}" title="Remove">\u00d7</button></div>`).join('');
-  $('mbox').innerHTML=`<h3>Publish to GitHub</h3>
-    <div class="sub">Pushes the generated site straight into a repo as one commit. Your token stays in this browser and is sent only to GitHub. Use a <b>fine-grained</b> token scoped to just these repos, with <b>Contents: Read and write</b>.</div>
-    <div class="fld"><label>GitHub token (fine-grained PAT)</label><input id="g-token" type="password" placeholder="${hasTok?'saved \u2014 paste to replace':'github_pat_\u2026'}"/>
-      <div class="hint">Make one at github.com \u2192 Settings \u2192 Developer settings \u2192 Fine-grained tokens. ${hasTok?'<a href="#" id="g-forget">Forget saved token</a>':''}</div></div>
-    <h2 style="font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#6f6f90;margin:14px 0 8px">Your repos</h2>
-    <div id="g-targets">${targetRows||'<div class="empty" style="padding:14px">No repos saved yet.</div>'}</div>
-    <div class="fld" style="margin-top:10px"><label>Add a repo (owner / repo / branch)</label>
-      <div style="display:flex;gap:6px"><input id="g-owner" placeholder="forkMyTypos" style="flex:1"/><input id="g-repo" placeholder="thaiFlashcards" style="flex:1"/><input id="g-branch" placeholder="main" style="width:80px"/></div></div>
-    <div id="g-status" class="hint" style="min-height:16px;color:#7ec4b8"></div>
-    <div class="row"><button class="tbtn" id="g-cancel">Close</button><button class="tbtn" id="g-add">Add repo</button></div>`;
+function publishModal(){
+  const s=activeSite;
+  const ready=s.token&&s.owner&&s.repo;
+  $('mbox').innerHTML=`<h3>Publish "${esc(s.title||'')}"</h3>
+    <div class="sub">${ready?'Pushes this course to <b>'+esc(s.owner)+'/'+esc(s.repo)+'</b> (branch '+esc(s.branch||'main')+') as one commit.':'This site isn\u2019t fully set up yet.'}</div>
+    ${ready?`<div class="hint" style="margin-bottom:6px">${lessons.length} lessons \u00b7 last published ${fmtAgo(s.lastAt)}</div>`:`<div class="hint" style="color:#f8b">Open <b>Site setup</b> first to add a token and choose a repo.</div>`}
+    <div id="p-status" class="hint" style="min-height:18px;color:#7ec4b8;white-space:pre-wrap"></div>
+    <div class="row"><button class="tbtn" id="p-cancel">Close</button>${ready?'<button class="tbtn primary" id="p-go">Publish now</button>':'<button class="tbtn primary" id="p-setup">Open Site setup</button>'}</div>`;
   $('modal').classList.add('show');
-  $('g-cancel').addEventListener('click',closeModal);
-  const forget=$('g-forget');if(forget)forget.addEventListener('click',async e=>{e.preventDefault();await ghSaveToken(null);toast('Token forgotten','info');githubModal();});
-  $('g-add').addEventListener('click',async()=>{
-    const tokInput=$('g-token').value.trim();if(tokInput)await ghSaveToken(tokInput);
-    const owner=$('g-owner').value.trim(),repo=$('g-repo').value.trim(),branch=$('g-branch').value.trim()||'main';
-    if(!owner||!repo){toast('Need owner and repo','err');return;}
-    await db.targets.add({owner,repo,branch});ghTargets=await db.targets.toArray();renderSites();githubModal();
-  });
-  $('mbox').querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{await db.targets.delete(Number(b.dataset.del));ghTargets=await db.targets.toArray();renderSites();githubModal();}));
-  $('mbox').querySelectorAll('[data-pub]').forEach(b=>b.addEventListener('click',async()=>{
-    const tokInput=$('g-token').value.trim();if(tokInput)await ghSaveToken(tokInput);
-    if(!ghToken){toast('Paste your token first','err');return;}
-    if(!lessons.length){toast('Add at least one lesson','err');return;}
-    const t=ghTargets.find(x=>x.id===Number(b.dataset.pub));
-    const st=$('g-status');b.disabled=true;
-    try{const sha=await publishToGitHub(t,m=>st.textContent=m);
-      st.innerHTML='\u2705 Published to '+esc(t.owner)+'/'+esc(t.repo)+' \u00b7 commit '+sha.slice(0,7)+'. Pages will redeploy shortly.';
-      toast('Published to GitHub','ok');}
+  $('p-cancel').addEventListener('click',closeModal);
+  const setup=$('p-setup');if(setup)setup.addEventListener('click',()=>{closeModal();siteSetupModal();});
+  const go=$('p-go');if(go)go.addEventListener('click',async()=>{
+    go.disabled=true;const st=$('p-status');
+    try{const sha=await publishActiveSite(m=>st.textContent=m);st.innerHTML='\u2705 Published \u00b7 commit '+sha.slice(0,7)+'. Pages will redeploy shortly.';toast('Published','ok');renderSiteSwitch();}
     catch(e){st.innerHTML='\u274c '+esc(e.message);toast('Publish failed','err');}
-    finally{b.disabled=false;}
-  }));
+    finally{go.disabled=false;}
+  });
 }
 
 /* ===== boot ===== */
 $('btn-add').addEventListener('click',addLessonModal);
-$('btn-settings').addEventListener('click',settingsModal);
-$('btn-github').addEventListener('click',githubModal);
-$('btn-add-site').addEventListener('click',githubModal);
+$('btn-setup').addEventListener('click',siteSetupModal);
+$('btn-repo').addEventListener('click',repoModal);
+$('btn-publish').addEventListener('click',publishModal);
+$('btn-new-site').addEventListener('click',newSite);
 $('btn-export').addEventListener('click',exportZip);
+$('site-switch').addEventListener('change',async()=>{await openSite(Number($('site-switch').value));renderLessons();renderPreview();});
 $('pv-pick').addEventListener('change',()=>{const v=$('pv-pick').value;if(v!=='__home'){activeLesson=Number(v);renderLessons();}renderPreview();});
 $('modal').addEventListener('mousedown',e=>{if(e.target.id==='modal')closeModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
-(async()=>{try{await load();await ghLoad();}catch(e){console.error(e);toast('Storage failed to open','err');}renderLessons();renderSites();renderPreview();})();
+(async()=>{try{await load();}catch(e){console.error(e);toast('Storage failed to open','err');}renderSiteSwitch();renderLessons();renderPreview();})();
 </script>
 </body>
 </html>
