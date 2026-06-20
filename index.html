@@ -157,7 +157,7 @@ function normalizeDeck(data){
   let name=null,arr=null;
   if(Array.isArray(data))arr=data;
   else if(data&&typeof data==='object'){name=data.name||data.title||data.deckName||null;arr=data.cards||data.flashcards||data.deck||data.items||data.entries||(Array.isArray(data.data)?data.data:null);}
-  if(!Array.isArray(arr))return{name,cards:[]};
+  if(!Array.isArray(arr))return{name,cards:[],ytVideoId:null};
   const pick=(o,keys)=>{for(const k of keys){if(o[k]!=null&&o[k]!=='')return o[k];}return'';};
   const wrap=v=>{const s=String(v==null?'':v);return /<[a-z][\s\S]*>/i.test(s)?s:'<div class="line" style="text-align:center">'+esc(s)+'</div>';};
   const cards=[];
@@ -167,9 +167,13 @@ function normalizeDeck(data){
     else if(raw&&typeof raw==='object'){a=pick(raw,['sideA','front','question','q','term','prompt','word','en','text']);b=pick(raw,['sideB','back','answer','a','definition','meaning','translation','def']);}
     else if(typeof raw==='string'){a=raw;}
     if(a===''&&b==='')continue;
-    cards.push({sideA:DOMPurify.sanitize(wrap(a)),sideB:DOMPurify.sanitize(wrap(b))});
+    // carry the YouTube clip through (set in inaflash.cards) so the published deck keeps it
+    let ytClip=null;
+    if(raw&&typeof raw==='object'&&raw.ytClip&&typeof raw.ytClip.startMs==='number'&&typeof raw.ytClip.endMs==='number')ytClip=raw.ytClip;
+    cards.push({sideA:DOMPurify.sanitize(wrap(a)),sideB:DOMPurify.sanitize(wrap(b)),ytClip});
   }
-  return{name,cards};
+  const ytVideoId=(data&&typeof data==='object'&&/^[A-Za-z0-9_-]{11}$/.test(data.ytVideoId||''))?data.ytVideoId:null;
+  return{name,cards,ytVideoId};
 }
 
 /* ===== persistence ===== */
@@ -221,7 +225,7 @@ function pageHead(o){const SITE=cfg.siteUrl.replace(/\/$/,'');return `<!DOCTYPE 
 </header>`;}
 function pageFoot(){return `<footer class="site-foot"><p>Studied with <a href="${cfg.appUrl}" target="_blank" rel="noopener">inaflash.cards</a>, a local-first flashcard app.</p></footer>
 </body></html>`;}
-function deckJSON(l){return JSON.stringify({name:l.title||'Lesson',version:2,cards:l.cards.map(c=>({sideA:c.sideA,sideB:c.sideB,sr:null,bg:null}))});}
+function deckJSON(l){return JSON.stringify({name:l.title||'Lesson',version:2,cards:l.cards.map(c=>({sideA:c.sideA,sideB:c.sideB,sr:null,bg:null,ytClip:c.ytClip||null})),ytVideoId:l.ytVideoId||null});}
 function importHref(l){const SITE=cfg.siteUrl.replace(/\/$/,'');return `${cfg.appUrl}/#import=${encodeURIComponent(SITE+'/decks/'+l.slug+'.json')}`;}
 
 function landingHTML(){
@@ -359,7 +363,7 @@ async function addLessonCommit(){
   let slug=slugify(t)||('lesson-'+(lessons.length+1));
   // ensure unique slug
   const used=new Set(lessons.map(l=>l.slug));let s=slug,n=2;while(used.has(s)){s=slug+'-'+n++;}slug=s;
-  const lesson={siteId:activeSite.id,title:t,slug,description:$('m-desc').value.trim(),level:$('m-level').value.trim(),cards:norm.cards,order:lessons.length};
+  const lesson={siteId:activeSite.id,title:t,slug,description:$('m-desc').value.trim(),level:$('m-level').value.trim(),cards:norm.cards,ytVideoId:norm.ytVideoId||null,order:lessons.length};
   const id=await db.lessons.add(lesson);lesson.id=id;lessons.push(lesson);activeLesson=id;
   closeModal();renderLessons();renderPreview();toast('Added "'+t+'" ('+norm.cards.length+' cards)','ok');
 }
