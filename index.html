@@ -78,6 +78,9 @@ a{color:#7cb0ff}
   <span class="sp"></span>
   <button class="tbtn" id="btn-setup">⚙ Site setup</button>
   <button class="tbtn" id="btn-repo">📁 Repo</button>
+  <button class="tbtn" id="btn-backup" title="Download all your sites & lessons as one file">⤓ Backup data</button>
+  <button class="tbtn" id="btn-restore-trigger" title="Restore from a backup file">⤒ Restore</button>
+  <input type="file" id="btn-restore-file" accept=".json,application/json" style="display:none"/>
   <button class="tbtn" id="btn-export" title="Download as a ZIP instead of publishing">Download .zip</button>
   <button class="tbtn primary" id="btn-publish">⬆ Publish</button>
 </div>
@@ -153,6 +156,106 @@ function creditLine(meta){
   if(by||src){const who=link?`<a href="${esc(link)}" target="_blank" rel="noopener nofollow">${esc(by||src)}</a>`:esc(by||src);return (by?'Photo: ':'Source: ')+who;}
   return '';
 }
+/* ===== Folder-of-images import =====
+   You pick a folder; files are sorted by filename (so name them 01,02,03... or
+   match the deck's existing order) and matched 1:1 to cards in order. Each image
+   is downscaled + compressed, then base64-embedded onto the back of its card —
+   same pattern as the main app, so the published deck stays self-contained and
+   works offline. Images run out before cards? remaining cards just stay text. */
+function _readImageFile(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('read failed'));r.readAsDataURL(file);});}
+function _compressDataURL(dataURL,maxEdge=1280){
+  return new Promise(resolve=>{
+    const im=new Image();
+    im.onload=()=>{
+      try{
+        let{naturalWidth:w,naturalHeight:h}=im;
+        const scale=Math.min(1,maxEdge/Math.max(w,h));
+        const cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));
+        const cv=document.createElement('canvas');cv.width=cw;cv.height=ch;
+        const cx=cv.getContext('2d');cx.drawImage(im,0,0,cw,ch);
+        let hasAlpha=false;try{const d=cx.getImageData(0,0,cw,ch).data;for(let i=3;i<d.length;i+=4){if(d[i]<250){hasAlpha=true;break;}}}catch(_){hasAlpha=true;}
+        const out=hasAlpha?cv.toDataURL('image/png'):cv.toDataURL('image/jpeg',0.82);
+        resolve(out.length<dataURL.length?out:dataURL);
+      }catch(_){resolve(dataURL);}
+    };
+    im.onerror=()=>resolve(dataURL);
+    im.src=dataURL;
+  });
+}
+function _slugifyName(s){return String(s||'').toLowerCase().replace(/\([^)]*\)/g,' ').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');}
+function naturalSortFiles(files){
+  return [...files].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true,sensitivity:'base'}));
+}
+/* Match images to cards by TEXT, not just file order \u2014 same algorithm as the
+   main app's folder-import, so a deck exported with imageMode:"folder" matches
+   the same way it would if you'd kept working in inaflash.cards. A file named
+   "thailand.jpg" attaches to the card whose text says "Thailand", wherever it
+   sits in the deck. Falls back to position only if nothing matches by text. */
+async function attachImagesToCards(cards,files,onProgress,imageSide){
+  const side=(imageSide==='A')?'sideA':'sideB';
+  const _placeholders=()=>{
+    let missing=0;
+    for(const c of cards){
+      for(const [imgKey,sd] of [['imgA','sideA'],['imgB','sideB']]){
+        if(!c[imgKey])continue;
+        const ph='<div class="line" style="text-align:center"><span style="display:inline-block;padding:10px 14px;border:1px dashed #b45;border-radius:8px;color:#d88;font-size:13px;background:#2a1418">\u26a0 missing image: '+esc(c[imgKey])+'</span></div>';
+        c[sd]=ph+(c[sd]||'');c[imgKey]=null;missing++;
+      }
+    }
+    return missing;
+  };
+  const imgFiles=Array.from(files).filter(f=>/^image\//.test(f.type)||/\.(jpe?g|png|gif|webp)$/i.test(f.name));
+  if(!imgFiles.length)return{matched:0,totalImages:0,totalCards:cards.length,missing:_placeholders()};
+  const bySlug={};
+  for(const f of imgFiles){const slug=_slugifyName(f.name.replace(/\.[^.]+$/,''));if(slug)bySlug[slug]=f;}
+  const byName={};
+  for(const f of imgFiles){byName[f.name.toLowerCase()]=f;byName[f.name.replace(/\.[^.]+$/,'').toLowerCase()]=f;}
+  const slugs=Object.keys(bySlug);
+  const used=new Set();
+  let matched=0,step=0;
+  const mkPic=small=>`<div class="line" style="text-align:center"><span class="img-run" data-img-run="1" style="display:inline-block;width:70%"><img src="${small}" style="width:100%"></span></div>`;
+  const lookup=name=>{if(!name)return null;const k=String(name).trim().toLowerCase();return byName[k]||byName[k.replace(/\.[^.]+$/,'')]||null;};
+  // Pass 0: explicit per-side filenames from the JSON (imgA/imgB)
+  for(const c of cards){
+    for(const [imgKey,sd] of [['imgA','sideA'],['imgB','sideB']]){
+      if(!c[imgKey])continue;
+      const file=lookup(c[imgKey]);if(!file)continue;
+      try{const dataURL=await _readImageFile(file);const small=await _compressDataURL(dataURL,1280);c[sd]=mkPic(small)+(c[sd]||'');used.add(file);matched++;step++;onProgress&&onProgress(step,imgFiles.length);c[imgKey]=null;}catch(_){}
+    }
+  }
+  for(const c of cards){
+    if(/<img/i.test(c.sideB||'')||/<img/i.test(c.sideA||''))continue; // already has one
+    const text=plainText(c.sideB)||plainText(c.sideA);if(!text)continue;
+    const textSlug=_slugifyName(text);
+    let hit=bySlug[textSlug]&&!used.has(bySlug[textSlug])?bySlug[textSlug]:null;
+    if(!hit)hit=slugs.map(s=>bySlug[s]).find(f=>!used.has(f)&&textSlug.includes(_slugifyName(f.name.replace(/\.[^.]+$/,''))));
+    if(!hit)continue;
+    used.add(hit);step++;onProgress&&onProgress(step,imgFiles.length);
+    try{
+      const dataURL=await _readImageFile(hit);
+      const small=await _compressDataURL(dataURL,1280);
+      c[side]=mkPic(small)+(c[side]||'');
+      matched++;
+    }catch(_){}
+  }
+  // fallback: anything still unmatched + leftover files get linked by position,
+  // sorted naturally, so a folder of "card1.jpg" style names still works.
+  const leftoverFiles=naturalSortFiles(imgFiles.filter(f=>!used.has(f)));
+  const unmatchedCards=cards.filter(c=>!/<img/i.test(c.sideB||'')&&!/<img/i.test(c.sideA||''));
+  const n=Math.min(leftoverFiles.length,unmatchedCards.length);
+  for(let i=0;i<n;i++){
+    step++;onProgress&&onProgress(step,imgFiles.length);
+    try{
+      const dataURL=await _readImageFile(leftoverFiles[i]);
+      const small=await _compressDataURL(dataURL,1280);
+      const pic=`<div class="line" style="text-align:center"><span class="img-run" data-img-run="1" style="display:inline-block;width:70%"><img src="${small}" style="width:100%"></span></div>`;
+      unmatchedCards[i][side]=pic+(unmatchedCards[i][side]||'');
+      matched++;
+    }catch(_){}
+  }
+  const missing=_placeholders();
+  return{matched,totalImages:imgFiles.length,totalCards:cards.length,missing};
+}
 function normalizeDeck(data){
   let name=null,arr=null;
   if(Array.isArray(data))arr=data;
@@ -170,10 +273,15 @@ function normalizeDeck(data){
     // carry the YouTube clip through (set in inaflash.cards) so the published deck keeps it
     let ytClip=null;
     if(raw&&typeof raw==='object'&&raw.ytClip&&typeof raw.ytClip.startMs==='number'&&typeof raw.ytClip.endMs==='number')ytClip=raw.ytClip;
-    cards.push({sideA:DOMPurify.sanitize(wrap(a)),sideB:DOMPurify.sanitize(wrap(b)),ytClip});
+    // Explicit per-side image filenames: sideA:"img1.png" -> embed that file on
+    // side A, don't render "img1.png" as text. Matches inaflash.cards behaviour.
+    const parseImg=v=>{if(typeof v!=='string')return null;const t=v.trim();const m=t.match(/^img:\s*(.+)$/i);if(m)return m[1].trim();if(/^[^\s<>]+\.(jpe?g|png|gif|webp)$/i.test(t))return t;return null;};
+    const aImg=parseImg(a), bImg=parseImg(b);
+    cards.push({sideA:aImg?'':DOMPurify.sanitize(wrap(a)),sideB:bImg?'':DOMPurify.sanitize(wrap(b)),imgA:aImg,imgB:bImg,ytClip});
   }
   const ytVideoId=(data&&typeof data==='object'&&/^[A-Za-z0-9_-]{11}$/.test(data.ytVideoId||''))?data.ytVideoId:null;
-  return{name,cards,ytVideoId};
+  const imageSide=(data&&typeof data==='object'&&data.imageSide==='A')?'A':'B';
+  return{name,cards,ytVideoId,imageSide};
 }
 
 /* ===== persistence ===== */
@@ -248,11 +356,25 @@ function lessonHTML(l,i){
   const SITE=cfg.siteUrl.replace(/\/$/,'');const url=`${SITE}/${l.slug}/`;
   const title=`${l.title} — ${(cfg.title||cfg.courseTitle||"")}`;
   const desc=l.description||(`${l.title}: `+l.cards.slice(0,6).map(c=>plainText(c.sideB)||plainText(c.sideA)).filter(Boolean).join(', '));
-  const rows=l.cards.map(c=>{const front=plainText(c.sideA),back=plainText(c.sideB);
-    const im=firstImage(c.sideB)||firstImage(c.sideA);
-    const cred=im&&im.meta?creditLine(im.meta):'';
-    const pic=im?`<div class="vocab-pic"><img src="${esc(im.src)}" alt="${attr(front||back)}" loading="lazy"/>${cred?`<span class="cred">${cred}</span>`:''}</div>`:'';
-    return `<div class="vocab-row${im?' has-pic':''}">${pic}<dt>${esc(front)}</dt><dd>${esc(back)}</dd></div>`;}).join('');
+  const faithful=!!cfg.cardFaithful; // per-site toggle: match the app's card look
+  let contentBlock;
+  if(faithful){
+    // Render each card's real HTML (formatting + images preserved) in a card-face.
+    const cardsHtml=l.cards.map(c=>{
+      const im=firstImage(c.sideB)||firstImage(c.sideA);
+      const cred=im&&im.meta?creditLine(im.meta):'';
+      const a=DOMPurify.sanitize(c.sideA||''),b=DOMPurify.sanitize(c.sideB||'');
+      return `<div class="card-face"><div class="c-side c-a">${a}</div><div class="c-side c-b">${b}</div>${cred?`<div class="c-cred">${cred}</div>`:''}</div>`;
+    }).join('');
+    contentBlock=`<h2 class="sec-h">Cards (${l.cards.length})</h2><div class="cards-grid">${cardsHtml}</div>`;
+  }else{
+    const rows=l.cards.map(c=>{const front=plainText(c.sideA),back=plainText(c.sideB);
+      const im=firstImage(c.sideB)||firstImage(c.sideA);
+      const cred=im&&im.meta?creditLine(im.meta):'';
+      const pic=im?`<div class="vocab-pic"><img src="${esc(im.src)}" alt="${attr(front||back)}" loading="lazy"/>${cred?`<span class="cred">${cred}</span>`:''}</div>`:'';
+      return `<div class="vocab-row${im?' has-pic':''}">${pic}<dt>${esc(front)}</dt><dd>${esc(back)}</dd></div>`;}).join('');
+    contentBlock=`<h2 class="sec-h">Contents (${l.cards.length} cards)</h2><dl class="vocab">${rows}</dl>`;
+  }
   const prev=i>0?lessons[i-1]:null,next=i<lessons.length-1?lessons[i+1]:null;
   const nav=`<nav class="lesson-nav">${prev?`<a href="${SITE}/${esc(prev.slug)}/">← ${esc(prev.title)}</a>`:'<span></span>'}${next?`<a href="${SITE}/${esc(next.slug)}/">${esc(next.title)} →</a>`:'<span></span>'}</nav>`;
   const ld={"@context":"https://schema.org","@type":"LearningResource","name":l.title,"description":desc,"url":url,"educationalLevel":l.level||"Beginner","teaches":l.cards.map(c=>plainText(c.sideB)).filter(Boolean),"isPartOf":{"@type":"Course","name":(cfg.title||cfg.courseTitle||""),"url":SITE+'/'},"provider":{"@type":"Organization","name":cfg.author,"url":cfg.appUrl}};
@@ -263,7 +385,7 @@ function lessonHTML(l,i){
     <div class="study-cta"><a class="btn primary" href="${importHref(l)}">★ Study these as flashcards</a>
       <a class="btn" href="${relPath(url)}decks/${esc(l.slug)}.json" download>Download deck (.json)</a></div>
     <p class="cta-note">"Study" loads this set into <a href="${cfg.appUrl}" target="_blank" rel="noopener">inaflash.cards</a> — free flip cards, quizzes & spaced repetition.</p>
-    <h2 class="sec-h">Contents (${l.cards.length} cards)</h2><dl class="vocab">${rows}</dl></article>${nav}</main>
+    ${contentBlock}</article>${nav}</main>
     <script type="application/ld+json">${JSON.stringify(ld)}<\/script>
     <script type="application/ld+json">${JSON.stringify(crumbs)}<\/script>`+pageFoot();
 }
@@ -295,6 +417,32 @@ article h1{font-size:28px;color:#fff;line-height:1.25;margin-bottom:10px}.lead{f
 .site-foot{border-top:1px solid #1c1c2a;padding:24px 20px;text-align:center;color:#6a6a86;font-size:12.5px}.site-foot a{color:#8a8aa8}
 @media(max-width:540px){.hero h1{font-size:27px}.vocab-row dd{min-width:80px}}`;
 
+/* ===== Card-faithful CSS =====
+   Reproduces how inaflash.cards renders a card's contents, so the published
+   page can show cards the same way the app does (instead of the vocab table).
+   Mirrors the app's .line / .img-run rules + Arial default. Bundled by default;
+   a per-site CSS override box can replace it. */
+const CARD_FACE_CSS=`.cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;margin-top:8px}
+.card-face{background:#fff;color:#161616;border:1px solid #d8d8e2;border-radius:12px;padding:18px 16px;font-family:Arial,Helvetica,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.18);min-height:120px}
+.card-face .c-side{padding:6px 0}
+.card-face .c-a{border-bottom:1px solid #ececf2;margin-bottom:8px;padding-bottom:10px}
+.card-face .line{min-height:unset;white-space:pre-wrap;word-break:break-word;line-height:1.6;text-align:center}
+.card-face .img-run{display:inline-block;max-width:100%;vertical-align:middle}
+.card-face .img-run img{width:100%;display:block;border-radius:4px}
+.card-face img{max-width:100%;height:auto;display:inline-block;border-radius:4px}
+.card-face .c-cred{font-size:9px;color:#8a8a9a;text-align:center;margin-top:4px}
+@media(max-width:540px){.cards-grid{grid-template-columns:1fr}}`;
+
+/* The CSS actually written to the published site: base styles, plus the
+   card-faithful styles when that mode is on, plus any per-site override the
+   user pasted (override wins by coming last). */
+function buildSiteCSS(){
+  let css=SITE_CSS;
+  if(cfg&&cfg.cardFaithful)css+='\n'+CARD_FACE_CSS;
+  if(cfg&&cfg.cssOverride&&cfg.cssOverride.trim())css+='\n/* --- site override --- */\n'+cfg.cssOverride;
+  return css;
+}
+
 /* ===== rendering the left panel + preview ===== */
 function fmtAgo(ts){if(!ts)return 'never published';const s=(Date.now()-ts)/1000;if(s<60)return 'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
 
@@ -315,7 +463,7 @@ function renderPreview(){
   let html;
   if(pickVal==='__home'){html=landingHTML();$('pv-count').textContent=lessons.length+' lessons';}
   else{const i=lessons.findIndex(l=>l.id==pickVal);const l=lessons[i];if(!l){html=landingHTML();}else{html=lessonHTML(l,i);$('pv-count').textContent=l.cards.length+' cards';}}
-  fr.srcdoc=html.replace('</head>',`<style>${SITE_CSS}</style></head>`);
+  fr.srcdoc=html.replace('</head>',`<style>${buildSiteCSS()}</style></head>`);
 }
 function renderLessons(){
   const host=$('lessons');host.innerHTML='';
@@ -344,24 +492,63 @@ function addLessonModal(){
     <div class="fld"><label>Deck JSON</label><textarea id="m-json" placeholder='{"name":"…","cards":[…]}' style="min-height:120px;font-family:monospace;font-size:11px"></textarea></div>
     <div class="file-drop" id="m-drop">📂 …or click to choose an exported .json file</div>
     <input type="file" id="m-file" accept=".json,application/json" style="display:none"/>
-    <div class="hint">Tip: in inaflash.cards, Export → "This set" gives you the JSON for one deck.</div>
+    <div class="fld" style="margin-top:10px" id="m-imgwrap"><label id="m-imglabel">Images (optional)</label>
+      <div class="file-drop" id="m-imgdrop">\U0001f5bc\ufe0f Click to choose a folder of images \u2014 matched by card text first, then by order</div>
+      <input type="file" id="m-imgfiles" webkitdirectory directory multiple accept="image/*" style="display:none"/>
+      <div class="hint" id="m-imgstatus">No images selected.</div></div>
+    <div class="hint">Tip: in inaflash.cards, Export \u2192 "This set" gives you the JSON for one deck.</div>
     <div class="row"><button class="tbtn" id="m-cancel">Cancel</button><button class="tbtn primary" id="m-ok">Add lesson</button></div>`;
   $('modal').classList.add('show');
   $('m-cancel').addEventListener('click',closeModal);
+  let _pendingImages=null;
+  // If the exported JSON declares imageMode:"folder", make the image step
+  // unmissable \u2014 inaflash.cards is telling us this deck NEEDS its image folder.
+  function _checkImageMode(){
+    let mode=null;try{const d=JSON.parse($('m-json').value);mode=d&&d.imageMode;}catch(_){}
+    const wrap=$('m-imgwrap'),drop=$('m-imgdrop'),label=$('m-imglabel');
+    if(mode==='folder'&&!_pendingImages){
+      wrap.style.border='1px solid #5a4a2b';wrap.style.borderRadius='8px';wrap.style.padding='8px';wrap.style.background='#1c160a';
+      label.innerHTML='Images <span style="color:#fbbf24;font-weight:700;">\u2014 this deck needs its image folder</span>';
+      drop.textContent='\U0001f5bc\ufe0f This set was exported expecting a matching image folder \u2014 click to choose it';
+    }else{
+      wrap.style.border='';wrap.style.borderRadius='';wrap.style.padding='';wrap.style.background='';
+      label.textContent='Images (optional)';
+      drop.textContent='\U0001f5bc\ufe0f Click to choose a folder of images \u2014 matched by card text first, then by order';
+    }
+  }
   $('m-drop').addEventListener('click',()=>$('m-file').click());
-  $('m-file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;f.text().then(t=>{$('m-json').value=t;if(!$('m-title').value){try{const d=JSON.parse(t);if(d.name)$('m-title').value=d.name;}catch(_){}}});});
+  $('m-file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;f.text().then(t=>{$('m-json').value=t;if(!$('m-title').value){try{const d=JSON.parse(t);if(d.name)$('m-title').value=d.name;}catch(_){}}_checkImageMode();});});
+  $('m-json').addEventListener('input',_checkImageMode);
   $('m-json').addEventListener('blur',()=>{if(!$('m-title').value){try{const d=JSON.parse($('m-json').value);if(d&&d.name)$('m-title').value=d.name;}catch(_){}}});
-  $('m-ok').addEventListener('click',addLessonCommit);
+  $('m-imgdrop').addEventListener('click',()=>$('m-imgfiles').click());
+  $('m-imgfiles').addEventListener('change',e=>{
+    const files=Array.from(e.target.files||[]).filter(f=>/^image\//.test(f.type));
+    _pendingImages=files.length?files:null;
+    $('m-imgstatus').textContent=files.length?(files.length+' image'+(files.length!==1?'s':'')+' selected \u2014 matched by card text, leftovers by order'):'No images found in that folder.';
+    _checkImageMode();
+  });
+  $('m-ok').addEventListener('click',()=>{
+    let mode=null;try{const d=JSON.parse($('m-json').value);mode=d&&d.imageMode;}catch(_){}
+    if(mode==='folder'&&!_pendingImages){
+      if(!confirm('This deck was exported expecting an image folder, but none is selected. Add it anyway with no images?'))return;
+    }
+    addLessonCommit(_pendingImages);
+  });
 }
-async function addLessonCommit(){
+async function addLessonCommit(imageFiles){
   const title=$('m-title').value.trim();const raw=$('m-json').value.trim();
   if(!raw){toast('Paste a deck JSON first','err');return;}
-  let data;try{data=JSON.parse(raw);}catch(_){toast('That JSON didn\\u2019t parse','err');return;}
+  let data;try{data=JSON.parse(raw);}catch(_){toast('That JSON didn\u2019t parse','err');return;}
   const norm=normalizeDeck(data);
   if(!norm.cards.length){toast('No cards found in that JSON','err');return;}
+  const okBtn=$('m-ok');
+  okBtn.disabled=true;
+  const res=await attachImagesToCards(norm.cards,(imageFiles||[]),(i,n)=>{$('m-imgstatus').textContent='Embedding image '+i+' of '+n+'\u2026';},norm.imageSide);
+  okBtn.disabled=false;
+  if(imageFiles&&imageFiles.length&&res.totalImages>res.totalCards)$('m-imgstatus').textContent='Matched '+res.matched+' images to '+res.totalCards+' cards \u2014 '+(res.totalImages-res.totalCards)+' extra image'+(res.totalImages-res.totalCards!==1?'s':'')+' left over.';
+  if(res.missing)toast(res.missing+' referenced image'+(res.missing!==1?'s':'')+' not found \u2014 shown as placeholders','info');
   const t=title||norm.name||('Lesson '+(lessons.length+1));
   let slug=slugify(t)||('lesson-'+(lessons.length+1));
-  // ensure unique slug
   const used=new Set(lessons.map(l=>l.slug));let s=slug,n=2;while(used.has(s)){s=slug+'-'+n++;}slug=s;
   const lesson={siteId:activeSite.id,title:t,slug,description:$('m-desc').value.trim(),level:$('m-level').value.trim(),cards:norm.cards,ytVideoId:norm.ytVideoId||null,order:lessons.length};
   const id=await db.lessons.add(lesson);lesson.id=id;lessons.push(lesson);activeLesson=id;
@@ -377,6 +564,13 @@ function siteSetupModal(){
     <div class="fld"><label>Site URL (where it's hosted &mdash; sets the CNAME &amp; import links)</label><input id="s-site" value="${attr(s.siteUrl||'')}" placeholder="https://thai.inaflash.cards"/></div>
     <div class="fld"><label>App URL</label><input id="s-app" value="${attr(s.appUrl||'https://inaflash.cards')}" placeholder="https://inaflash.cards"/></div>
     <div class="fld"><label>Author / organization</label><input id="s-author" value="${attr(s.author||'')}"/></div>
+    <hr style="border:none;border-top:1px solid #1f1f2e;margin:16px 0"/>
+    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#6f6f90;margin-bottom:8px">Appearance</div>
+    <label class="fld" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer"><input type="checkbox" id="s-faithful" ${s.cardFaithful?'checked':''} style="margin-top:3px;width:auto"/>
+      <span><b>Match the app look</b> \u2014 render cards on the published site the way they appear in inaflash.cards (keeps fonts, colours, images and layout), instead of a plain vocab table.</span></label>
+    <div class="fld"><label>Custom CSS (optional, overrides the above)</label>
+      <textarea id="s-css" placeholder="/* paste CSS to fine-tune the published site */" style="min-height:90px;font-family:monospace;font-size:11px">${esc(s.cssOverride||'')}</textarea>
+      <div class="hint">Appended last, so it wins over the built-in styles. Target <code>.card-face</code>, <code>.line</code>, <code>.vocab-row</code>, etc.</div></div>
     <hr style="border:none;border-top:1px solid #1f1f2e;margin:16px 0"/>
     <div style="font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#6f6f90;margin-bottom:8px">GitHub publishing</div>
     <div class="sub" style="margin-bottom:10px">Paste a <b>fine-grained token</b> for this repo (Contents: Read &amp; write). It's stored only in this browser. Paste it and I'll detect which repos it can publish to.</div>
@@ -422,6 +616,8 @@ function siteSetupModal(){
     s.siteUrl=($('s-site').value.trim()||'https://example.com').replace(/\/$/,'');
     s.appUrl=($('s-app').value.trim()||'https://inaflash.cards').replace(/\/$/,'');
     s.author=$('s-author').value.trim()||'inaflash.cards';
+    s.cardFaithful=$('s-faithful').checked;
+    s.cssOverride=$('s-css').value;
     const tok=$('s-token').value.trim();if(tok)s.token=tok;
     s.owner=$('s-owner').value.trim();s.repo=$('s-repo').value.trim();s.branch=$('s-branch').value.trim()||'main';
     await saveSite();closeModal();renderSiteSwitch();renderLessons();renderPreview();toast('Site saved','ok');
@@ -433,12 +629,40 @@ async function newSite(){
 }
 
 /* ===== export ZIP ===== */
+/* ===== Backup / restore Course Builder's own data (sites + lessons) =====
+   This is NOT the published site export — it's your working data, so you can
+   move between browsers/machines or recover from a wipe. Tokens are
+   deliberately left out of the file; re-paste them after restoring. */
+async function backupAllData(){
+  const allSites=await db.sites.toArray();
+  const allLessons=await db.lessons.toArray();
+  const data={
+    app:'course-builder',version:1,exportedAt:new Date().toISOString(),
+    sites:allSites.map(s=>{const{token,...rest}=s;return rest;}), // never export the token
+    lessons:allLessons
+  };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='course-builder-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click();URL.revokeObjectURL(a.href);
+  toast('Backup downloaded (tokens excluded \u2014 re-add after restoring)','ok');
+}
+async function restoreAllData(file){
+  let data;try{data=JSON.parse(await file.text());}catch(e){toast('Couldn\u2019t read that file','err');return;}
+  if(data.app!=='course-builder'||!Array.isArray(data.sites)){toast('Not a Course Builder backup file','err');return;}
+  if(!confirm('Import '+data.sites.length+' site'+(data.sites.length!==1?'s':'')+' and '+(data.lessons||[]).length+' lesson'+((data.lessons||[]).length!==1?'s':'')+'? This adds to what you have \u2014 it won\u2019t delete anything.'))return;
+  const idMap={};
+  for(const s of data.sites){const{id,...rest}=s;const nid=await db.sites.add({...rest,token:''});idMap[id]=nid;}
+  for(const l of (data.lessons||[])){const{id,siteId,...rest}=l;const nsid=idMap[siteId];if(nsid==null)continue;await db.lessons.add({...rest,siteId:nsid});}
+  sites=await db.sites.toArray();await openSite(sites[sites.length-1].id);
+  renderSiteSwitch();renderLessons();renderPreview();
+  toast('Restored '+data.sites.length+' site'+(data.sites.length!==1?'s':'')+' \u2014 re-add their tokens in Site setup','ok');
+}
+
 async function exportZip(){
   if(!lessons.length){toast('Add at least one lesson first','err');return;}
   if(typeof JSZip==='undefined'){toast('ZIP library still loading — try again in a sec','err');return;}
   const SITE=cfg.siteUrl.replace(/\/$/,'');
   const zip=new JSZip();
-  zip.file('style.css',SITE_CSS);
+  zip.file('style.css',buildSiteCSS());
   zip.file('index.html',landingHTML().replace('</head>',`</head>`));
   zip.file('.nojekyll','');
   // CNAME from the site URL host
@@ -471,7 +695,7 @@ function collectSiteFiles(){
   const SITE=cfg.siteUrl.replace(/\/$/,'');
   const files={};
   files['index.html']={content:landingHTML()};
-  files['style.css']={content:SITE_CSS};
+  files['style.css']={content:buildSiteCSS()};
   files['.nojekyll']={content:''};
   try{files['CNAME']={content:new URL(SITE).host+'\n'};}catch(_){}
   lessons.forEach((l,i)=>{files[l.slug+'/index.html']={content:lessonHTML(l,i)};files['decks/'+l.slug+'.json']={content:deckJSON(l)};});
@@ -599,6 +823,9 @@ $('btn-repo').addEventListener('click',repoModal);
 $('btn-publish').addEventListener('click',publishModal);
 $('btn-new-site').addEventListener('click',newSite);
 $('btn-export').addEventListener('click',exportZip);
+$('btn-backup').addEventListener('click',backupAllData);
+$('btn-restore-trigger').addEventListener('click',()=>$('btn-restore-file').click());
+$('btn-restore-file').addEventListener('change',e=>{const f=e.target.files[0];if(f)restoreAllData(f);e.target.value='';});
 $('site-switch').addEventListener('change',async()=>{await openSite(Number($('site-switch').value));renderLessons();renderPreview();});
 $('pv-pick').addEventListener('change',()=>{const v=$('pv-pick').value;if(v!=='__home'){activeLesson=Number(v);renderLessons();}renderPreview();});
 $('modal').addEventListener('mousedown',e=>{if(e.target.id==='modal')closeModal();});
